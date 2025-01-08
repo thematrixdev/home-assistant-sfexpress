@@ -1,0 +1,26 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "data": {
+          "member_id": "Member ID",
+          "phone_number": "Phone Number",
+          "screensize": "Screen Size",
+          "mediacode": "Media Code",
+          "systemversion": "System Version",
+          "clientversion": "Client Version",
+          "model": "Model",
+          "deviceid": "Device ID",
+          "jsbundle": "JS Bundle"
+        },
+        "description": "Enter your SF Express HK Member ID and Phone Number",
+        "title": "SF Express HK"
+      }
+    },
+    "error": {
+      "api_error": "{error_detail}",
+      "cannot_connect": "Failed to connect to SF Express HK.",
+      "unknown": "[%key:common::config_flow::error::unknown%]"
+    }
+  }
+}

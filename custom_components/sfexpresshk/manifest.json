@@ -1,0 +1,14 @@
+{
+  "version": "1.0.0",
+  "issue_tracker": "https://github.com/thematrixdev/home-assistant-sfexpress/issues",
+
+  "domain": "sfexpresshk",
+  "name": "SF-Express HK",
+  "integration_type": "service",
+  "documentation": "https://github.com/thematrixdev/home-assistant-sfexpress",
+  "codeowners": ["@thematrixdev"],
+  "config_flow": true,
+  "requirements": [],
+  "loggers": ["sfexpresshk"],  
+  "iot_class": "cloud_polling"
+}

@@ -1,5 +1,11 @@
 # SF Express (HK) Home-Assistant Custom-Component
 
+## IMPORTANT
+
+This integration requires reverse engineering knowledge to obtain the required parameters.
+
+The way to obtain such parameters is not provided.
+
 ## Add to HACS
 
 1. Setup `HACS` https://hacs.xyz/docs/setup/prerequisites
@@ -7,15 +13,15 @@
 3. Select `integrations`
 4. Click the menu button in the top right hand corner
 5. Choose `custom repositories`
-6. Enter `https://github.com/thematrixdev/home-assistant-marksix` and choose `Integration`, click `ADD`
-7. Find and click on `Mark Six HK` in the `custom repositories` list
+6. Enter `https://github.com/thematrixdev/home-assistant-sfexpress` and choose `Integration`, click `ADD`
+7. Find and click on `SF-Express HK` in the `custom repositories` list
 8. Click the `DOWNLOAD` button in the bottom right hand corner
 
 ## Install
 
 1. Go to `Settings`, `Devices and Services`
 2. Click the `Add Integration` button
-3. Search `Mark Six HK`
+3. Search `SF-Express HK`
 4. Go through the configuration flow
 5. Restart Home Assistant
 
@@ -24,7 +30,7 @@
 ### Basic
 
 - On Home Assistant, go to `Settigns` -> `Logs`
-- Search `Mark Six HK`
+- Search `SF-Express HK`
 
 ### Advanced
 
@@ -34,12 +40,12 @@
 logger:
   default: info
   logs:
-    custom_components.marksixhk: debug
+    custom_components.sfexpresshk: debug
 ```
 
 - Restart Home Assistant
 - On Home Assistant, go to `Settigns` -> `Logs`
-- Search `Mark Six HK`
+- Search `SF-Express HK`
 - Click the `LOAD FULL LOGS` button
 
 ## Support
@@ -48,7 +54,7 @@ logger:
 - Specify:
     - What's wrong
     - Home Assistant version
-    - Mark Six custom-integration version
+    - SF-Express custom-integration version
     - Logs
 
 ## Unofficial support
