@@ -49,9 +49,14 @@ async def async_setup_entry(
 
     entities = [SFExpressWaybillSensor(coordinator)]
     
-    # Only add SFBuy sensor if ticket is configured
+    # Only add SFBuy sensors if ticket is configured
     if CONF_SFBUY_TICKET in entry.data:
-        entities.append(SFBuySensor(coordinator))
+        entities.extend([
+            SFBuyAwaitingRegisterSensor(coordinator),
+            SFBuyAwaitingRecordSensor(coordinator),
+            SFBuyAwaitingPaymentSensor(coordinator),
+            SFBuyAwaitingDeliverySensor(coordinator),
+        ])
 
     async_add_entities(entities, True)
 
@@ -355,8 +360,8 @@ class SFExpressWaybillSensor(CoordinatorEntity, SensorEntity):
         }
 
 
-class SFBuySensor(CoordinatorEntity[SFExpressCoordinator], SensorEntity):
-    """SFBuy package count sensor."""
+class SFBuyAwaitingRegisterSensor(CoordinatorEntity[SFExpressCoordinator], SensorEntity):
+    """Representation of a SF Express SFBuy Awaiting Register sensor."""
 
     _attr_native_unit_of_measurement = "packages"
     _attr_has_entity_name = True
@@ -364,8 +369,8 @@ class SFBuySensor(CoordinatorEntity[SFExpressCoordinator], SensorEntity):
     def __init__(self, coordinator: SFExpressCoordinator) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
-        self._attr_unique_id = "sfbuy"
-        self._attr_name = "SFBuy"
+        self._attr_unique_id = "sfbuy_forecast"
+        self._attr_name = "SFBuy Awaiting Register"
 
     @property
     def native_value(self) -> int | None:
@@ -373,22 +378,67 @@ class SFBuySensor(CoordinatorEntity[SFExpressCoordinator], SensorEntity):
         if not self.coordinator.sfbuy_data:
             return None
 
-        return (
-            self.coordinator.sfbuy_data.get("awaitForecastCount", 0)
-            + self.coordinator.sfbuy_data.get("awaitInStorageCount", 0)
-            + self.coordinator.sfbuy_data.get("awaitPayCount", 0)
-            + self.coordinator.sfbuy_data.get("awaitSignCount", 0)
-        )
+        return self.coordinator.sfbuy_data.get("awaitForecastCount", 0)
+
+
+class SFBuyAwaitingRecordSensor(CoordinatorEntity[SFExpressCoordinator], SensorEntity):
+    """Representation of a SF Express SFBuy Awaiting Record sensor."""
+
+    _attr_native_unit_of_measurement = "packages"
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: SFExpressCoordinator) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = "sfbuy_storage"
+        self._attr_name = "SFBuy Awaiting Record"
 
     @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Return the state attributes."""
+    def native_value(self) -> int | None:
+        """Return the state of the sensor."""
         if not self.coordinator.sfbuy_data:
-            return {}
+            return None
 
-        return {
-            "await_forecast": self.coordinator.sfbuy_data.get("awaitForecastCount", 0),
-            "await_in_storage": self.coordinator.sfbuy_data.get("awaitInStorageCount", 0),
-            "await_pay": self.coordinator.sfbuy_data.get("awaitPayCount", 0),
-            "await_sign": self.coordinator.sfbuy_data.get("awaitSignCount", 0),
-        }
+        return self.coordinator.sfbuy_data.get("awaitInStorageCount", 0)
+
+
+class SFBuyAwaitingPaymentSensor(CoordinatorEntity[SFExpressCoordinator], SensorEntity):
+    """Representation of a SF Express SFBuy Awaiting Payment sensor."""
+
+    _attr_native_unit_of_measurement = "packages"
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: SFExpressCoordinator) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = "sfbuy_pay"
+        self._attr_name = "SFBuy Awaiting Payment"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the state of the sensor."""
+        if not self.coordinator.sfbuy_data:
+            return None
+
+        return self.coordinator.sfbuy_data.get("awaitPayCount", 0)
+
+
+class SFBuyAwaitingDeliverySensor(CoordinatorEntity[SFExpressCoordinator], SensorEntity):
+    """Representation of a SF Express SFBuy Awaiting Delivery sensor."""
+
+    _attr_native_unit_of_measurement = "packages"
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: SFExpressCoordinator) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = "sfbuy_sign"
+        self._attr_name = "SFBuy Awaiting Delivery"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the state of the sensor."""
+        if not self.coordinator.sfbuy_data:
+            return None
+
+        return self.coordinator.sfbuy_data.get("awaitSignCount", 0)
