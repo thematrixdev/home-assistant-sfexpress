@@ -306,7 +306,7 @@ class SFExpressWaybillSensor(CoordinatorEntity, SensorEntity):
     def __init__(self, coordinator: SFExpressCoordinator) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
-        self._attr_name = "SF Express Receiving"
+        self._attr_name = "SFExpress Receiving"
         self._attr_unique_id = "sfexpress_receiving"
 
     @property
@@ -364,7 +364,7 @@ class SFBuySensor(CoordinatorEntity[SFExpressCoordinator], SensorEntity):
     def __init__(self, coordinator: SFExpressCoordinator) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
-        self._attr_unique_id = f"{coordinator.entry.entry_id}_sfbuy"
+        self._attr_unique_id = "sfbuy"
         self._attr_name = "SFBuy"
 
     @property
