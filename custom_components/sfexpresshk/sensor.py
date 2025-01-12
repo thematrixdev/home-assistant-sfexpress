@@ -26,6 +26,9 @@ from .const import (
     API_CARRIER,
     API_LIST_WAYBILL_ENDPOINT,
     API_QUERY_ROUTE_ENDPOINT,
+    API_SFBUY_COUNT_ENDPOINT,
+    SFBUY_HEADERS,
+    CONF_SFBUY_TICKET,
 )
 from .utils import generate_syttoken
 
@@ -44,7 +47,13 @@ async def async_setup_entry(
     coordinator = SFExpressCoordinator(hass, entry)
     await coordinator.async_config_entry_first_refresh()
 
-    async_add_entities([SFExpressWaybillSensor(coordinator)], True)
+    entities = [SFExpressWaybillSensor(coordinator)]
+    
+    # Only add SFBuy sensor if ticket is configured
+    if CONF_SFBUY_TICKET in entry.data:
+        entities.append(SFBuySensor(coordinator))
+
+    async_add_entities(entities, True)
 
 
 class SFExpressCoordinator(DataUpdateCoordinator):
@@ -59,6 +68,7 @@ class SFExpressCoordinator(DataUpdateCoordinator):
             update_interval=SCAN_INTERVAL,
         )
         self.entry = entry
+        self.sfbuy_data = None
 
     async def _fetch_routes(self, waybill_numbers: list[str], config: dict) -> dict:
         """Fetch route information for waybills."""
@@ -149,6 +159,40 @@ class SFExpressCoordinator(DataUpdateCoordinator):
         except Exception as err:
             _LOGGER.error("Error fetching route data: %s", err)
             return {}
+
+    async def _fetch_sfbuy_data(self) -> dict:
+        """Fetch SFBuy package count data."""
+        # Only fetch if ticket is configured
+        if CONF_SFBUY_TICKET not in self.entry.data:
+            return None
+
+        headers = SFBUY_HEADERS.copy()
+        headers["Cookie"] = f"token={self.entry.data[CONF_SFBUY_TICKET]}"
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{API_SFBUY_COUNT_ENDPOINT}?operator=",
+                    headers=headers,
+                ) as response:
+                    response_text = await response.text()
+                    _LOGGER.debug("SFBuy Response: %s", response_text)
+                    
+                    if response.status != 200:
+                        raise aiohttp.ClientError(
+                            f"Error fetching SFBuy data: {response.status}"
+                        )
+                    
+                    data = json.loads(response_text)
+                    if data.get("msg") != "成功":
+                        raise aiohttp.ClientError(
+                            f"API Error: {data.get('msg', 'Unknown error')}"
+                        )
+                    
+                    return data.get("data", {})
+        except Exception as err:
+            _LOGGER.error("Error fetching SFBuy data: %s", err)
+            return None
 
     async def _async_update_data(self):
         """Fetch data from SF Express."""
@@ -246,6 +290,10 @@ class SFExpressCoordinator(DataUpdateCoordinator):
                         if waybill["waybillno"] in routes:
                             waybill["routes"] = routes[waybill["waybillno"]]
                     
+                    # Only fetch SFBuy data if ticket is configured
+                    if CONF_SFBUY_TICKET in self.entry.data:
+                        self.sfbuy_data = await self._fetch_sfbuy_data()
+
                     return data["obj"]
         except Exception as err:
             _LOGGER.error("Error updating SF Express data: %s", err)
@@ -259,7 +307,7 @@ class SFExpressWaybillSensor(CoordinatorEntity, SensorEntity):
         """Initialize the sensor."""
         super().__init__(coordinator)
         self._attr_name = "SF Express Receiving"
-        self._attr_unique_id = f"{coordinator.entry.entry_id}_receiving"
+        self._attr_unique_id = "sfexpress_receiving"
 
     @property
     def native_value(self):
@@ -304,6 +352,43 @@ class SFExpressWaybillSensor(CoordinatorEntity, SensorEntity):
         
         return {
             "waybills": waybills,
-            "my_receive_total": self.coordinator.data.get("myReceiveTotal", 0),
-            "my_send_total": self.coordinator.data.get("mySendTotal", 0),
+        }
+
+
+class SFBuySensor(CoordinatorEntity[SFExpressCoordinator], SensorEntity):
+    """SFBuy package count sensor."""
+
+    _attr_native_unit_of_measurement = "packages"
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: SFExpressCoordinator) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.entry.entry_id}_sfbuy"
+        self._attr_name = "SFBuy"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the state of the sensor."""
+        if not self.coordinator.sfbuy_data:
+            return None
+
+        return (
+            self.coordinator.sfbuy_data.get("awaitForecastCount", 0)
+            + self.coordinator.sfbuy_data.get("awaitInStorageCount", 0)
+            + self.coordinator.sfbuy_data.get("awaitPayCount", 0)
+            + self.coordinator.sfbuy_data.get("awaitSignCount", 0)
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return the state attributes."""
+        if not self.coordinator.sfbuy_data:
+            return {}
+
+        return {
+            "await_forecast": self.coordinator.sfbuy_data.get("awaitForecastCount", 0),
+            "await_in_storage": self.coordinator.sfbuy_data.get("awaitInStorageCount", 0),
+            "await_pay": self.coordinator.sfbuy_data.get("awaitPayCount", 0),
+            "await_sign": self.coordinator.sfbuy_data.get("awaitSignCount", 0),
         }
