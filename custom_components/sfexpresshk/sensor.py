@@ -34,7 +34,7 @@ from .utils import generate_syttoken
 
 _LOGGER = logging.getLogger(__name__)
 
-SCAN_INTERVAL = timedelta(minutes=15)
+SCAN_INTERVAL = timedelta(minutes=1)
 
 
 async def async_setup_entry(
