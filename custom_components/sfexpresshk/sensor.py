@@ -259,7 +259,10 @@ class SFExpressCoordinator(DataUpdateCoordinator):
                             key=lambda x: (x["scanDate"], x["scanTime"]),
                             reverse=True
                         )
-                        routes[waybill_no] = sorted_routes
+                        routes[waybill_no] = {
+                            "routes": sorted_routes,
+                            "pickupCode": None
+                        }
                         
                         # Check if the latest route has opCode 125 (待取件)
                         if sorted_routes:
@@ -267,7 +270,12 @@ class SFExpressCoordinator(DataUpdateCoordinator):
                             if latest_route.get("opCode") == "125":
                                 pickup_code = await self._fetch_pickup_code(waybill_no, config)
                                 if pickup_code:
-                                    waybill["pickupCode"] = pickup_code
+                                    routes[waybill_no]["pickupCode"] = pickup_code
+                                    _LOGGER.debug(
+                                        "Added pickup code for waybill %s with latest opCode %s",
+                                        waybill_no,
+                                        latest_route.get("opCode")
+                                    )
                     
                     return routes
         except Exception as err:
@@ -415,10 +423,19 @@ class SFExpressCoordinator(DataUpdateCoordinator):
                     for waybill in data["obj"].get("dataList", []):
                         waybill_no = waybill["waybillno"]
                         if waybill_no in routes:
-                            waybill["routes"] = routes[waybill_no]
-                            # If pickup code is available, add it to the waybill
-                            if "pickupCode" in routes[waybill_no]:
-                                waybill["pickupCode"] = routes[waybill_no]["pickupCode"]
+                            route_data = routes[waybill_no]
+                            waybill["routes"] = route_data["routes"]
+                            
+                            # Only include pickupCode if latest route has opCode 125 and we have a valid code
+                            latest_route = route_data["routes"][0] if route_data["routes"] else None
+                            if (latest_route and 
+                                latest_route.get("opCode") == "125" and 
+                                route_data["pickupCode"]):
+                                waybill["pickupCode"] = route_data["pickupCode"]
+                                _LOGGER.debug(
+                                    "Including pickup code for waybill %s in attributes",
+                                    waybill_no
+                                )
                     
                     # Only fetch SFBuy data if ticket is configured
                     if CONF_SFBUY_TICKET in self.entry.data:
