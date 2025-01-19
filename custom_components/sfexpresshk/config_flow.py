@@ -1,59 +1,97 @@
 """Config flow for SF Express HK integration."""
 from __future__ import annotations
 
-import json
 import logging
+import json
 import time
 import aiohttp
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.const import CONF_PASSWORD
+from homeassistant.const import CONF_DEVICE_ID
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import FlowResult
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 
 from .const import (
     DOMAIN,
     CONF_PHONE_NUMBER,
     CONF_MEMBER_ID,
+    CONF_SFBUY_TICKET,
+    API_QUERY_USER_ENDPOINT,
+    API_SFBUY_COUNT_ENDPOINT,
+    SFBUY_HEADERS,
     API_REGION_CODE,
     API_LANGUAGE_CODE,
     API_USER_AGENT,
     API_CONTENT_TYPE,
     API_ACCEPT_ENCODING,
     API_CARRIER,
-    API_LOGIN_ENDPOINT,
-    API_QUERY_USER_ENDPOINT,
 )
 from .utils import generate_syttoken
 
 _LOGGER = logging.getLogger(__name__)
-
-STEP_USER_DATA_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_PHONE_NUMBER): str,
-        vol.Required(CONF_MEMBER_ID): str,
-        vol.Required("screensize"): str,
-        vol.Required("mediacode"): str,
-        vol.Required("systemversion"): str,
-        vol.Required("clientversion"): str,
-        vol.Required("model"): str,
-        vol.Required("deviceid"): str,
-        vol.Required("jsbundle"): str,
-    }
-)
 
 class SFExpressConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for SF Express HK."""
 
     VERSION = 1
 
+    def __init__(self) -> None:
+        """Initialize the config flow."""
+        self.data = {}
+        self.entry: config_entries.ConfigEntry | None = None
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> SFExpressOptionsFlow:
+        """Get the options flow for this handler."""
+        return SFExpressOptionsFlow(config_entry)
+
     async def async_step_user(
         self, user_input: dict[str, str] | None = None
     ) -> FlowResult:
         """Handle the initial step."""
+        if user_input is None:
+            return self.async_show_form(
+                step_id="user",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required(CONF_PHONE_NUMBER): str,
+                        vol.Required(CONF_MEMBER_ID): str,
+                        vol.Required("screensize"): str,
+                        vol.Required("mediacode"): str,
+                        vol.Required("systemversion"): str,
+                        vol.Required("clientversion"): str,
+                        vol.Required("model"): str,
+                        vol.Required("deviceid"): str,
+                        vol.Required("jsbundle"): str,
+                        vol.Optional(CONF_SFBUY_TICKET): str,
+                    }
+                ),
+            )
+
         errors = {}
 
-        if user_input is not None:
+        try:
+            # First verify SF Express credentials
+            await self._verify_sf_express(user_input)
+            
+            # Only verify SFBuy ticket if provided
+            if user_input.get(CONF_SFBUY_TICKET):
+                await self._verify_sfbuy_ticket(user_input[CONF_SFBUY_TICKET])
+
+        except CannotConnect:
+            errors["base"] = "cannot_connect"
+        except InvalidAuth as err:
+            errors["base"] = str(err)
+        except Exception:  # pylint: disable=broad-except
+            _LOGGER.exception("Unexpected exception")
+            errors["base"] = "unknown"
+        else:
             time_interval = str(int(time.time() * 1000))
 
             self.data = {
@@ -62,113 +100,347 @@ class SFExpressConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "systemversion": user_input["systemversion"],
                 "clientversion": user_input["clientversion"],
                 "model": user_input["model"],
-                "carrier": API_CARRIER,
                 "deviceid": user_input["deviceid"],
                 "jsbundle": user_input["jsbundle"],
-                "regioncode": API_REGION_CODE,
                 "languagecode": API_LANGUAGE_CODE,
                 "mobile": user_input[CONF_PHONE_NUMBER],
                 "member_id": user_input[CONF_MEMBER_ID],
             }
 
-            try:
-                body_json = json.dumps({
-                    "memberId": user_input[CONF_MEMBER_ID],
-                })
+            # Only add SFBuy ticket if provided
+            if user_input.get(CONF_SFBUY_TICKET):
+                self.data[CONF_SFBUY_TICKET] = user_input[CONF_SFBUY_TICKET]
 
-                # Generate syttoken for member verification
-                syttoken = generate_syttoken(
-                    body_json=body_json,
-                    device_id=user_input["deviceid"],
-                    client_version=user_input["clientversion"],
-                    time_interval=time_interval,
-                    region_code=API_REGION_CODE,
-                    language_code=API_LANGUAGE_CODE,
-                    js_bundle=user_input["jsbundle"],
-                )
+            return self.async_create_entry(
+                title=user_input[CONF_PHONE_NUMBER],
+                data=self.data,
+            )
+
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_PHONE_NUMBER): str,
+                    vol.Required(CONF_MEMBER_ID): str,
+                    vol.Required("screensize"): str,
+                    vol.Required("mediacode"): str,
+                    vol.Required("systemversion"): str,
+                    vol.Required("clientversion"): str,
+                    vol.Required("model"): str,
+                    vol.Required("deviceid"): str,
+                    vol.Required("jsbundle"): str,
+                    vol.Optional(CONF_SFBUY_TICKET): str,
+                }
+            ),
+            errors=errors,
+        )
+
+    async def _verify_sfbuy_ticket(self, ticket: str) -> None:
+        """Verify SFBuy ticket is valid."""
+        headers = SFBUY_HEADERS.copy()
+        headers["Cookie"] = f"token={ticket}"
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{API_SFBUY_COUNT_ENDPOINT}?operator=",
+                    headers=headers,
+                ) as response:
+                    response_text = await response.text()
+                    _LOGGER.debug("SFBuy Response: %s", response_text)
+                    
+                    if response.status != 200:
+                        raise CannotConnect
+                    
+                    data = json.loads(response_text)
+                    if data.get("msg") != "成功":
+                        raise InvalidAuth(data.get("msg", "Unknown error"))
+
+        except aiohttp.ClientError as err:
+            _LOGGER.error("Error connecting to SFBuy: %s", err)
+            raise CannotConnect from err
+        except json.JSONDecodeError as err:
+            _LOGGER.error("Error decoding SFBuy response: %s", err)
+            raise CannotConnect from err
+
+    async def _verify_sf_express(self, user_input: dict) -> None:
+        """Verify SF Express credentials are valid."""
+        body_json = json.dumps({
+            "memberId": user_input[CONF_MEMBER_ID],
+        })
+
+        # Generate syttoken for member verification
+        syttoken = generate_syttoken(
+            body_json=body_json,
+            device_id=user_input["deviceid"],
+            client_version=user_input["clientversion"],
+            time_interval=str(int(time.time() * 1000)),
+            region_code=API_REGION_CODE,
+            language_code=API_LANGUAGE_CODE,
+            js_bundle=user_input["jsbundle"],
+        )
+        
+        # Prepare headers for member verification
+        headers = {
+            "screensize": user_input["screensize"],
+            "mediacode": user_input["mediacode"],
+            "systemversion": user_input["systemversion"],
+            "clientversion": user_input["clientversion"],
+            "model": user_input["model"],
+            "carrier": API_CARRIER,
+            "deviceid": user_input["deviceid"],
+            "jsbundle": user_input["jsbundle"],
+            "regioncode": API_REGION_CODE,
+            "memberid": user_input[CONF_MEMBER_ID],
+            "mobile": user_input[CONF_PHONE_NUMBER],
+            "languagecode": API_LANGUAGE_CODE,
+            "timeinterval": str(int(time.time() * 1000)),
+            "syttoken": syttoken,
+            "content-type": API_CONTENT_TYPE,
+            "accept-encoding": API_ACCEPT_ENCODING,
+            "user-agent": API_USER_AGENT,
+        }
+
+        # Log request details for member verification
+        _LOGGER.debug("Request URL: %s", API_QUERY_USER_ENDPOINT)
+        _LOGGER.debug("Request Headers: %s", headers)
+        _LOGGER.debug("Request Body: %s", body_json)
+        _LOGGER.debug("Generated syttoken: %s", syttoken)
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{API_QUERY_USER_ENDPOINT}",
+                headers=headers,
+                data=body_json,
+            ) as response:
+                response_text = await response.text()
                 
-                # Prepare headers for member verification
-                headers = {
+                # Log response details
+                _LOGGER.debug("Response Status: %d", response.status)
+                _LOGGER.debug("Response Headers: %s", dict(response.headers))
+                _LOGGER.debug("Response Body: %s", response_text)
+
+                if response.status != 200:
+                    _LOGGER.error(
+                        "Error verifying member: %s", response.status
+                    )
+                    raise CannotConnect
+
+                data = json.loads(response_text)
+
+                if data["success"] == "false":
+                    _LOGGER.error(
+                        "API Error: %s (Error code: %s)", 
+                        data.get("errorMessage", "Unknown error"),
+                        data.get("errorCode", "unknown")
+                    )
+                    raise InvalidAuth
+
+
+class SFExpressOptionsFlow(config_entries.OptionsFlow):
+    """Handle SF Express options."""
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        """Initialize options flow."""
+        self._config_entry = config_entry
+
+    async def async_step_init(
+        self, user_input: dict[str, str] | None = None
+    ) -> FlowResult:
+        """Manage the options."""
+        errors = {}
+
+        if user_input is not None:
+            had_sfbuy = CONF_SFBUY_TICKET in self._config_entry.data
+            will_have_sfbuy = bool(user_input.get(CONF_SFBUY_TICKET))
+
+            try:
+                # First verify SF Express credentials
+                await self._verify_sf_express(user_input)
+                
+                # Only verify SFBuy ticket if provided
+                if user_input.get(CONF_SFBUY_TICKET):
+                    await self._verify_sfbuy_ticket(user_input[CONF_SFBUY_TICKET])
+
+            except CannotConnect:
+                errors["base"] = "cannot_connect"
+            except InvalidAuth as err:
+                errors["base"] = str(err)
+            except Exception:  # pylint: disable=broad-except
+                _LOGGER.exception("Unexpected exception")
+                errors["base"] = "unknown"
+
+            if not errors:
+                # Update the config entry with all fields
+                data = {
                     "screensize": user_input["screensize"],
                     "mediacode": user_input["mediacode"],
                     "systemversion": user_input["systemversion"],
                     "clientversion": user_input["clientversion"],
                     "model": user_input["model"],
-                    "carrier": API_CARRIER,
                     "deviceid": user_input["deviceid"],
                     "jsbundle": user_input["jsbundle"],
-                    "regioncode": API_REGION_CODE,
-                    "memberid": user_input[CONF_MEMBER_ID],
-                    "mobile": user_input[CONF_PHONE_NUMBER],
                     "languagecode": API_LANGUAGE_CODE,
-                    "timeinterval": time_interval,
-                    "syttoken": syttoken,
-                    "content-type": API_CONTENT_TYPE,
-                    "accept-encoding": API_ACCEPT_ENCODING,
-                    "user-agent": API_USER_AGENT,
+                    CONF_PHONE_NUMBER: user_input[CONF_PHONE_NUMBER],
+                    CONF_MEMBER_ID: user_input[CONF_MEMBER_ID],
                 }
 
-                # Log request details for member verification
-                _LOGGER.debug("Request URL: %s", API_QUERY_USER_ENDPOINT)
-                _LOGGER.debug("Request Headers: %s", headers)
-                _LOGGER.debug("Request Body: %s", body_json)
-                _LOGGER.debug("Generated syttoken: %s", syttoken)
+                # Add SFBuy ticket if provided
+                if user_input.get(CONF_SFBUY_TICKET):
+                    data[CONF_SFBUY_TICKET] = user_input[CONF_SFBUY_TICKET]
 
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(
-                        f"{API_QUERY_USER_ENDPOINT}",
-                        headers=headers,
-                        data=body_json,
-                    ) as response:
-                        response_text = await response.text()
-                        
-                        # Log response details
-                        _LOGGER.debug("Response Status: %d", response.status)
-                        _LOGGER.debug("Response Headers: %s", dict(response.headers))
-                        _LOGGER.debug("Response Body: %s", response_text)
+                # Update the entry
+                self.hass.config_entries.async_update_entry(
+                    self._config_entry,
+                    data=data,
+                )
 
-                        if response.status != 200:
-                            _LOGGER.error(
-                                "Error verifying member: %s", response.status
-                            )
-                            errors["base"] = "cannot_connect"
-                            return self.async_show_form(
-                                step_id="user",
-                                data_schema=STEP_USER_DATA_SCHEMA,
-                                errors=errors,
-                            )
-
-                        data = await response.json()
-
-                        if data["success"] == "false":
-                            _LOGGER.error(
-                                "API Error: %s (Error code: %s)", 
-                                data.get("errorMessage", "Unknown error"),
-                                data.get("errorCode", "unknown")
-                            )
-                            errors["base"] = "api_error"
-                            return self.async_show_form(
-                                step_id="user",
-                                data_schema=STEP_USER_DATA_SCHEMA,
-                                errors=errors,
-                                description_placeholders={
-                                    "error_detail": data.get("errorMessage", "Unknown error")
-                                },
-                            )
-
-                        return self.async_create_entry(
-                            title=f"SF Express HK ({user_input[CONF_PHONE_NUMBER]})",
-                            data=self.data,
+                # Handle sensor registration/removal
+                if had_sfbuy != will_have_sfbuy:
+                    entity_registry = er.async_get(self.hass)
+                    
+                    # Remove sensor if ticket is removed
+                    if had_sfbuy and not will_have_sfbuy:
+                        entity_id = entity_registry.async_get_entity_id(
+                            "sensor",
+                            DOMAIN,
+                            f"{self._config_entry.entry_id}_sfbuy",
                         )
+                        if entity_id:
+                            entity_registry.async_remove(entity_id)
 
-            except aiohttp.ClientError:
-                errors["base"] = "cannot_connect"
-            except Exception:  # pylint: disable=broad-except
-                _LOGGER.exception("Unexpected exception")
-                errors["base"] = "unknown"
+                    # Reload entry to add sensor if ticket is added
+                    await self.hass.config_entries.async_reload(self._config_entry.entry_id)
+
+                return self.async_create_entry(title="", data={})
+
+        # Pre-fill with current values
+        defaults = {
+            CONF_PHONE_NUMBER: self._config_entry.data.get(CONF_PHONE_NUMBER),
+            CONF_MEMBER_ID: self._config_entry.data.get(CONF_MEMBER_ID),
+            "screensize": self._config_entry.data.get("screensize"),
+            "mediacode": self._config_entry.data.get("mediacode"),
+            "systemversion": self._config_entry.data.get("systemversion"),
+            "clientversion": self._config_entry.data.get("clientversion"),
+            "model": self._config_entry.data.get("model"),
+            "deviceid": self._config_entry.data.get("deviceid"),
+            "jsbundle": self._config_entry.data.get("jsbundle"),
+            CONF_SFBUY_TICKET: self._config_entry.data.get(CONF_SFBUY_TICKET),
+        }
 
         return self.async_show_form(
-            step_id="user",
-            data_schema=STEP_USER_DATA_SCHEMA,
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_PHONE_NUMBER, default=defaults[CONF_PHONE_NUMBER]): str,
+                    vol.Required(CONF_MEMBER_ID, default=defaults[CONF_MEMBER_ID]): str,
+                    vol.Required("screensize", default=defaults["screensize"]): str,
+                    vol.Required("mediacode", default=defaults["mediacode"]): str,
+                    vol.Required("systemversion", default=defaults["systemversion"]): str,
+                    vol.Required("clientversion", default=defaults["clientversion"]): str,
+                    vol.Required("model", default=defaults["model"]): str,
+                    vol.Required("deviceid", default=defaults["deviceid"]): str,
+                    vol.Required("jsbundle", default=defaults["jsbundle"]): str,
+                    vol.Optional(CONF_SFBUY_TICKET, default=defaults[CONF_SFBUY_TICKET]): str,
+                }
+            ),
             errors=errors,
         )
+
+    async def _verify_sfbuy_ticket(self, ticket: str) -> None:
+        """Verify SFBuy ticket is valid."""
+        headers = SFBUY_HEADERS.copy()
+        headers["Cookie"] = f"token={ticket}"
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{API_SFBUY_COUNT_ENDPOINT}?operator=",
+                    headers=headers,
+                ) as response:
+                    response_text = await response.text()
+                    _LOGGER.debug("SFBuy Response: %s", response_text)
+                    
+                    if response.status != 200:
+                        raise CannotConnect
+                    
+                    data = json.loads(response_text)
+                    if data.get("msg") != "成功":
+                        raise InvalidAuth(data.get("msg", "Unknown error"))
+
+        except aiohttp.ClientError as err:
+            _LOGGER.error("Error connecting to SFBuy: %s", err)
+            raise CannotConnect from err
+        except json.JSONDecodeError as err:
+            _LOGGER.error("Error decoding SFBuy response: %s", err)
+            raise CannotConnect from err
+
+    async def _verify_sf_express(self, user_input: dict) -> None:
+        """Verify SF Express credentials are valid."""
+        body_json = json.dumps({
+            "memberId": user_input[CONF_MEMBER_ID],
+        })
+
+        # Generate syttoken for member verification
+        syttoken = generate_syttoken(
+            body_json=body_json,
+            device_id=user_input["deviceid"],
+            client_version=user_input["clientversion"],
+            time_interval=str(int(time.time() * 1000)),
+            region_code=API_REGION_CODE,
+            language_code=API_LANGUAGE_CODE,
+            js_bundle=user_input["jsbundle"],
+        )
+        
+        # Prepare headers for member verification
+        headers = {
+            "screensize": user_input["screensize"],
+            "mediacode": user_input["mediacode"],
+            "systemversion": user_input["systemversion"],
+            "clientversion": user_input["clientversion"],
+            "model": user_input["model"],
+            "carrier": API_CARRIER,
+            "deviceid": user_input["deviceid"],
+            "jsbundle": user_input["jsbundle"],
+            "regioncode": API_REGION_CODE,
+            "memberid": user_input[CONF_MEMBER_ID],
+            "mobile": user_input[CONF_PHONE_NUMBER],
+            "languagecode": API_LANGUAGE_CODE,
+            "timeinterval": str(int(time.time() * 1000)),
+            "syttoken": syttoken,
+            "content-type": API_CONTENT_TYPE,
+            "accept-encoding": API_ACCEPT_ENCODING,
+            "user-agent": API_USER_AGENT,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{API_QUERY_USER_ENDPOINT}",
+                headers=headers,
+                data=body_json,
+            ) as response:
+                response_text = await response.text()
+                
+                if response.status != 200:
+                    _LOGGER.error(
+                        "Error verifying member: %s", response.status
+                    )
+                    raise CannotConnect
+
+                data = json.loads(response_text)
+
+                if data["success"] == "false":
+                    _LOGGER.error(
+                        "API Error: %s (Error code: %s)", 
+                        data.get("errorMessage", "Unknown error"),
+                        data.get("errorCode", "unknown")
+                    )
+                    raise InvalidAuth(data.get("errorMessage", "Unknown error"))
+
+
+class CannotConnect(HomeAssistantError):
+    """Error to indicate we cannot connect."""
+
+
+class InvalidAuth(HomeAssistantError):
+    """Error to indicate there is invalid auth."""

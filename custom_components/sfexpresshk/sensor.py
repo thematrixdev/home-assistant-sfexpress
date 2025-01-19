@@ -26,12 +26,16 @@ from .const import (
     API_CARRIER,
     API_LIST_WAYBILL_ENDPOINT,
     API_QUERY_ROUTE_ENDPOINT,
+    API_SFBUY_COUNT_ENDPOINT,
+    API_PICKUP_CODE_ENDPOINT,
+    SFBUY_HEADERS,
+    CONF_SFBUY_TICKET,
 )
 from .utils import generate_syttoken
 
 _LOGGER = logging.getLogger(__name__)
 
-SCAN_INTERVAL = timedelta(minutes=15)
+SCAN_INTERVAL = timedelta(minutes=1)
 
 
 async def async_setup_entry(
@@ -44,7 +48,18 @@ async def async_setup_entry(
     coordinator = SFExpressCoordinator(hass, entry)
     await coordinator.async_config_entry_first_refresh()
 
-    async_add_entities([SFExpressWaybillSensor(coordinator)], True)
+    entities = [SFExpressWaybillSensor(coordinator)]
+    
+    # Only add SFBuy sensors if ticket is configured
+    if CONF_SFBUY_TICKET in entry.data:
+        entities.extend([
+            SFBuyAwaitingRegisterSensor(coordinator),
+            SFBuyAwaitingRecordSensor(coordinator),
+            SFBuyAwaitingPaymentSensor(coordinator),
+            SFBuyAwaitingDeliverySensor(coordinator),
+        ])
+
+    async_add_entities(entities, True)
 
 
 class SFExpressCoordinator(DataUpdateCoordinator):
@@ -59,6 +74,85 @@ class SFExpressCoordinator(DataUpdateCoordinator):
             update_interval=SCAN_INTERVAL,
         )
         self.entry = entry
+        self.sfbuy_data = None
+
+    async def _fetch_pickup_code(self, waybill_no: str, config: dict) -> str | None:
+        """Fetch pickup code for a waybill."""
+        time_interval = str(int(time.time() * 1000))
+        
+        # Prepare request body
+        body = {"waybillNo": waybill_no}
+        body_json = json.dumps(body)
+
+        # Generate new syttoken for pickup code query
+        syttoken = generate_syttoken(
+            body_json=body_json,
+            device_id=config["deviceid"],
+            client_version=config["clientversion"],
+            time_interval=time_interval,
+            region_code=API_REGION_CODE,
+            language_code=API_LANGUAGE_CODE,
+            js_bundle=config["jsbundle"],
+        )
+
+        # Prepare headers
+        headers = {
+            "screensize": config["screensize"],
+            "mediacode": config["mediacode"],
+            "systemversion": config["systemversion"],
+            "clientversion": config["clientversion"],
+            "model": config["model"],
+            "carrier": API_CARRIER,
+            "deviceid": config["deviceid"],
+            "jsbundle": config["jsbundle"],
+            "regioncode": API_REGION_CODE,
+            "memberid": config["member_id"],
+            "mobile": config["mobile"],
+            "languagecode": API_LANGUAGE_CODE,
+            "timeinterval": time_interval,
+            "syttoken": syttoken,
+            "content-type": API_CONTENT_TYPE,
+            "accept-encoding": API_ACCEPT_ENCODING,
+            "user-agent": API_USER_AGENT,
+        }
+
+        try:
+            # Log request details
+            _LOGGER.debug("Pickup Code Request URL: %s", API_PICKUP_CODE_ENDPOINT)
+            _LOGGER.debug("Pickup Code Request Headers: %s", headers)
+            _LOGGER.debug("Pickup Code Request Body: %s", body_json)
+            _LOGGER.debug("Pickup Code Generated syttoken: %s", syttoken)
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    API_PICKUP_CODE_ENDPOINT,
+                    headers=headers,
+                    json=body,
+                ) as response:
+                    response_text = await response.text()
+                    
+                    # Log response details
+                    _LOGGER.debug("Pickup Code Response Status: %d", response.status)
+                    _LOGGER.debug("Pickup Code Response Headers: %s", dict(response.headers))
+                    _LOGGER.debug("Pickup Code Response Body: %s", response_text)
+
+                    if response.status != 200:
+                        raise aiohttp.ClientError(
+                            f"Error fetching pickup code: {response.status}"
+                        )
+                    
+                    data = json.loads(response_text)
+                    
+                    if not data.get("success", False):
+                        raise aiohttp.ClientError(
+                            f"API Error: {data.get('errorMessage', 'Unknown error')}"
+                        )
+                    
+                    rec_code_info = data.get("obj", {}).get("recCodeInfo", {})
+                    return rec_code_info.get("pickupCode")
+        except Exception as err:
+            _LOGGER.error("Error fetching pickup code: %s", err)
+            return None
 
     async def _fetch_routes(self, waybill_numbers: list[str], config: dict) -> dict:
         """Fetch route information for waybills."""
@@ -108,13 +202,13 @@ class SFExpressCoordinator(DataUpdateCoordinator):
             "user-agent": API_USER_AGENT,
         }
 
-        # Log request details
-        _LOGGER.debug("Route Request URL: %s", API_QUERY_ROUTE_ENDPOINT)
-        _LOGGER.debug("Route Request Headers: %s", headers)
-        _LOGGER.debug("Route Request Body: %s", body_json)
-        _LOGGER.debug("Route Generated syttoken: %s", syttoken)
-
         try:
+            # Log request details
+            _LOGGER.debug("Route Request URL: %s", API_QUERY_ROUTE_ENDPOINT)
+            _LOGGER.debug("Route Request Headers: %s", headers)
+            _LOGGER.debug("Route Request Body: %s", body_json)
+            _LOGGER.debug("Route Generated syttoken: %s", syttoken)
+
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     API_QUERY_ROUTE_ENDPOINT,
@@ -143,12 +237,55 @@ class SFExpressCoordinator(DataUpdateCoordinator):
                     # Create a mapping of waybill number to routes
                     routes = {}
                     for waybill in data.get("obj", []):
-                        routes[waybill["waybillNo"]] = waybill.get("barNewList", [])
+                        waybill_no = waybill["waybillNo"]
+                        routes[waybill_no] = waybill.get("barNewList", [])
+                        
+                        # Check if the latest route has opCode 125 (待取件)
+                        if routes[waybill_no]:
+                            latest_route = routes[waybill_no][0]
+                            if latest_route.get("opCode") == "125":
+                                pickup_code = await self._fetch_pickup_code(waybill_no, config)
+                                if pickup_code:
+                                    waybill["pickupCode"] = pickup_code
                     
                     return routes
         except Exception as err:
             _LOGGER.error("Error fetching route data: %s", err)
             return {}
+
+    async def _fetch_sfbuy_data(self) -> dict:
+        """Fetch SFBuy package count data."""
+        # Only fetch if ticket is configured
+        if CONF_SFBUY_TICKET not in self.entry.data:
+            return None
+
+        headers = SFBUY_HEADERS.copy()
+        headers["Cookie"] = f"token={self.entry.data[CONF_SFBUY_TICKET]}"
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{API_SFBUY_COUNT_ENDPOINT}?operator=",
+                    headers=headers,
+                ) as response:
+                    response_text = await response.text()
+                    _LOGGER.debug("SFBuy Response: %s", response_text)
+                    
+                    if response.status != 200:
+                        raise aiohttp.ClientError(
+                            f"Error fetching SFBuy data: {response.status}"
+                        )
+                    
+                    data = json.loads(response_text)
+                    if data.get("msg") != "成功":
+                        raise aiohttp.ClientError(
+                            f"API Error: {data.get('msg', 'Unknown error')}"
+                        )
+                    
+                    return data.get("data", {})
+        except Exception as err:
+            _LOGGER.error("Error fetching SFBuy data: %s", err)
+            return None
 
     async def _async_update_data(self):
         """Fetch data from SF Express."""
@@ -243,9 +380,17 @@ class SFExpressCoordinator(DataUpdateCoordinator):
                     
                     # Add routes to the waybill data
                     for waybill in data["obj"].get("dataList", []):
-                        if waybill["waybillno"] in routes:
-                            waybill["routes"] = routes[waybill["waybillno"]]
+                        waybill_no = waybill["waybillno"]
+                        if waybill_no in routes:
+                            waybill["routes"] = routes[waybill_no]
+                            # If pickup code is available, add it to the waybill
+                            if "pickupCode" in routes[waybill_no]:
+                                waybill["pickupCode"] = routes[waybill_no]["pickupCode"]
                     
+                    # Only fetch SFBuy data if ticket is configured
+                    if CONF_SFBUY_TICKET in self.entry.data:
+                        self.sfbuy_data = await self._fetch_sfbuy_data()
+
                     return data["obj"]
         except Exception as err:
             _LOGGER.error("Error updating SF Express data: %s", err)
@@ -258,8 +403,8 @@ class SFExpressWaybillSensor(CoordinatorEntity, SensorEntity):
     def __init__(self, coordinator: SFExpressCoordinator) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
-        self._attr_name = "SF Express Receiving"
-        self._attr_unique_id = f"{coordinator.entry.entry_id}_receiving"
+        self._attr_name = "SFExpress Receiving"
+        self._attr_unique_id = "sfexpress_receiving"
 
     @property
     def native_value(self):
@@ -289,6 +434,10 @@ class SFExpressWaybillSensor(CoordinatorEntity, SensorEntity):
                 "originateContacts": waybill.get("originateContacts"),
             }
             
+            # Add pickup code if available
+            if "pickupCode" in waybill:
+                waybill_data["pickupCode"] = waybill["pickupCode"]
+            
             # Add routes if available, sorted by scanDate and scanTime in descending order
             if "routes" in waybill:
                 routes = waybill["routes"]
@@ -304,6 +453,88 @@ class SFExpressWaybillSensor(CoordinatorEntity, SensorEntity):
         
         return {
             "waybills": waybills,
-            "my_receive_total": self.coordinator.data.get("myReceiveTotal", 0),
-            "my_send_total": self.coordinator.data.get("mySendTotal", 0),
         }
+
+
+class SFBuyAwaitingRegisterSensor(CoordinatorEntity[SFExpressCoordinator], SensorEntity):
+    """Representation of a SF Express SFBuy Awaiting Register sensor."""
+
+    _attr_native_unit_of_measurement = "packages"
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: SFExpressCoordinator) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = "sfbuy_forecast"
+        self._attr_name = "SFBuy Awaiting Register"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the state of the sensor."""
+        if not self.coordinator.sfbuy_data:
+            return None
+
+        return self.coordinator.sfbuy_data.get("awaitForecastCount", 0)
+
+
+class SFBuyAwaitingRecordSensor(CoordinatorEntity[SFExpressCoordinator], SensorEntity):
+    """Representation of a SF Express SFBuy Awaiting Record sensor."""
+
+    _attr_native_unit_of_measurement = "packages"
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: SFExpressCoordinator) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = "sfbuy_storage"
+        self._attr_name = "SFBuy Awaiting Record"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the state of the sensor."""
+        if not self.coordinator.sfbuy_data:
+            return None
+
+        return self.coordinator.sfbuy_data.get("awaitInStorageCount", 0)
+
+
+class SFBuyAwaitingPaymentSensor(CoordinatorEntity[SFExpressCoordinator], SensorEntity):
+    """Representation of a SF Express SFBuy Awaiting Payment sensor."""
+
+    _attr_native_unit_of_measurement = "packages"
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: SFExpressCoordinator) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = "sfbuy_pay"
+        self._attr_name = "SFBuy Awaiting Payment"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the state of the sensor."""
+        if not self.coordinator.sfbuy_data:
+            return None
+
+        return self.coordinator.sfbuy_data.get("awaitPayCount", 0)
+
+
+class SFBuyAwaitingDeliverySensor(CoordinatorEntity[SFExpressCoordinator], SensorEntity):
+    """Representation of a SF Express SFBuy Awaiting Delivery sensor."""
+
+    _attr_native_unit_of_measurement = "packages"
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: SFExpressCoordinator) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator)
+        self._attr_unique_id = "sfbuy_sign"
+        self._attr_name = "SFBuy Awaiting Delivery"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the state of the sensor."""
+        if not self.coordinator.sfbuy_data:
+            return None
+
+        return self.coordinator.sfbuy_data.get("awaitSignCount", 0)
