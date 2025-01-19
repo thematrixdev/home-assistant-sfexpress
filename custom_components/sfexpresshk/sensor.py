@@ -75,9 +75,15 @@ class SFExpressCoordinator(DataUpdateCoordinator):
         )
         self.entry = entry
         self.sfbuy_data = None
+        self._pickup_code_cache = {}  # Cache for pickup codes: {waybill_no: pickup_code}
 
     async def _fetch_pickup_code(self, waybill_no: str, config: dict) -> str | None:
         """Fetch pickup code for a waybill."""
+        # Check cache first
+        if waybill_no in self._pickup_code_cache:
+            _LOGGER.debug("Using cached pickup code for waybill %s", waybill_no)
+            return self._pickup_code_cache[waybill_no]
+
         time_interval = str(int(time.time() * 1000))
         
         # Prepare request body
@@ -149,7 +155,14 @@ class SFExpressCoordinator(DataUpdateCoordinator):
                         )
                     
                     rec_code_info = data.get("obj", {}).get("recCodeInfo", {})
-                    return rec_code_info.get("pickupCode")
+                    pickup_code = rec_code_info.get("pickupCode")
+                    
+                    # Cache the pickup code if it's valid
+                    if pickup_code:
+                        _LOGGER.debug("Caching pickup code for waybill %s", waybill_no)
+                        self._pickup_code_cache[waybill_no] = pickup_code
+                    
+                    return pickup_code
         except Exception as err:
             _LOGGER.error("Error fetching pickup code: %s", err)
             return None
@@ -238,11 +251,19 @@ class SFExpressCoordinator(DataUpdateCoordinator):
                     routes = {}
                     for waybill in data.get("obj", []):
                         waybill_no = waybill["waybillNo"]
-                        routes[waybill_no] = waybill.get("barNewList", [])
+                        route_list = waybill.get("barNewList", [])
+                        
+                        # Sort routes by scanDate and scanTime in descending order
+                        sorted_routes = sorted(
+                            route_list,
+                            key=lambda x: (x["scanDate"], x["scanTime"]),
+                            reverse=True
+                        )
+                        routes[waybill_no] = sorted_routes
                         
                         # Check if the latest route has opCode 125 (待取件)
-                        if routes[waybill_no]:
-                            latest_route = routes[waybill_no][0]
+                        if sorted_routes:
+                            latest_route = sorted_routes[0]  # Now this is truly the latest route
                             if latest_route.get("opCode") == "125":
                                 pickup_code = await self._fetch_pickup_code(waybill_no, config)
                                 if pickup_code:
@@ -289,6 +310,18 @@ class SFExpressCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self):
         """Fetch data from SF Express."""
+        # Clear pickup code cache for waybills that are delivered
+        if self.data:
+            delivered_waybills = [
+                waybill["waybillno"]
+                for waybill in self.data.get("dataList", [])
+                if waybill.get("waybillStatus") == "4"
+            ]
+            for waybill_no in delivered_waybills:
+                if waybill_no in self._pickup_code_cache:
+                    _LOGGER.debug("Removing pickup code cache for delivered waybill %s", waybill_no)
+                    del self._pickup_code_cache[waybill_no]
+
         time_interval = str(int(time.time() * 1000))
         config = self.entry.data
 
