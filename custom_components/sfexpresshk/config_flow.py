@@ -18,10 +18,7 @@ from .const import (
     DOMAIN,
     CONF_PHONE_NUMBER,
     CONF_MEMBER_ID,
-    CONF_SFBUY_TICKET,
     API_QUERY_USER_ENDPOINT,
-    API_SFBUY_COUNT_ENDPOINT,
-    SFBUY_HEADERS,
     API_REGION_CODE,
     API_LANGUAGE_CODE,
     API_USER_AGENT,
@@ -69,7 +66,6 @@ class SFExpressConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         vol.Required("model"): str,
                         vol.Required("deviceid"): str,
                         vol.Required("jsbundle"): str,
-                        vol.Optional(CONF_SFBUY_TICKET): str,
                     }
                 ),
             )
@@ -77,13 +73,9 @@ class SFExpressConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
 
         try:
-            # First verify SF Express credentials
+            # Verify SF Express credentials
             await self._verify_sf_express(user_input)
             
-            # Only verify SFBuy ticket if provided
-            if user_input.get(CONF_SFBUY_TICKET):
-                await self._verify_sfbuy_ticket(user_input[CONF_SFBUY_TICKET])
-
         except CannotConnect:
             errors["base"] = "cannot_connect"
         except InvalidAuth as err:
@@ -107,10 +99,6 @@ class SFExpressConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "member_id": user_input[CONF_MEMBER_ID],
             }
 
-            # Only add SFBuy ticket if provided
-            if user_input.get(CONF_SFBUY_TICKET):
-                self.data[CONF_SFBUY_TICKET] = user_input[CONF_SFBUY_TICKET]
-
             return self.async_create_entry(
                 title=user_input[CONF_PHONE_NUMBER],
                 data=self.data,
@@ -129,39 +117,10 @@ class SFExpressConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     vol.Required("model"): str,
                     vol.Required("deviceid"): str,
                     vol.Required("jsbundle"): str,
-                    vol.Optional(CONF_SFBUY_TICKET): str,
                 }
             ),
             errors=errors,
         )
-
-    async def _verify_sfbuy_ticket(self, ticket: str) -> None:
-        """Verify SFBuy ticket is valid."""
-        headers = SFBUY_HEADERS.copy()
-        headers["Cookie"] = f"token={ticket}"
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{API_SFBUY_COUNT_ENDPOINT}?operator=",
-                    headers=headers,
-                ) as response:
-                    response_text = await response.text()
-                    _LOGGER.debug("SFBuy Response: %s", response_text)
-                    
-                    if response.status != 200:
-                        raise CannotConnect
-                    
-                    data = json.loads(response_text)
-                    if data.get("msg") != "成功":
-                        raise InvalidAuth(data.get("msg", "Unknown error"))
-
-        except aiohttp.ClientError as err:
-            _LOGGER.error("Error connecting to SFBuy: %s", err)
-            raise CannotConnect from err
-        except json.JSONDecodeError as err:
-            _LOGGER.error("Error decoding SFBuy response: %s", err)
-            raise CannotConnect from err
 
     async def _verify_sf_express(self, user_input: dict) -> None:
         """Verify SF Express credentials are valid."""
@@ -234,7 +193,7 @@ class SFExpressConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         data.get("errorMessage", "Unknown error"),
                         data.get("errorCode", "unknown")
                     )
-                    raise InvalidAuth
+                    raise InvalidAuth(data.get("errorMessage", "Unknown error"))
 
 
 class SFExpressOptionsFlow(config_entries.OptionsFlow):
@@ -251,17 +210,10 @@ class SFExpressOptionsFlow(config_entries.OptionsFlow):
         errors = {}
 
         if user_input is not None:
-            had_sfbuy = CONF_SFBUY_TICKET in self._config_entry.data
-            will_have_sfbuy = bool(user_input.get(CONF_SFBUY_TICKET))
-
             try:
-                # First verify SF Express credentials
+                # Verify SF Express credentials
                 await self._verify_sf_express(user_input)
                 
-                # Only verify SFBuy ticket if provided
-                if user_input.get(CONF_SFBUY_TICKET):
-                    await self._verify_sfbuy_ticket(user_input[CONF_SFBUY_TICKET])
-
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except InvalidAuth as err:
@@ -285,32 +237,11 @@ class SFExpressOptionsFlow(config_entries.OptionsFlow):
                     CONF_MEMBER_ID: user_input[CONF_MEMBER_ID],
                 }
 
-                # Add SFBuy ticket if provided
-                if user_input.get(CONF_SFBUY_TICKET):
-                    data[CONF_SFBUY_TICKET] = user_input[CONF_SFBUY_TICKET]
-
                 # Update the entry
                 self.hass.config_entries.async_update_entry(
                     self._config_entry,
                     data=data,
                 )
-
-                # Handle sensor registration/removal
-                if had_sfbuy != will_have_sfbuy:
-                    entity_registry = er.async_get(self.hass)
-                    
-                    # Remove sensor if ticket is removed
-                    if had_sfbuy and not will_have_sfbuy:
-                        entity_id = entity_registry.async_get_entity_id(
-                            "sensor",
-                            DOMAIN,
-                            f"{self._config_entry.entry_id}_sfbuy",
-                        )
-                        if entity_id:
-                            entity_registry.async_remove(entity_id)
-
-                    # Reload entry to add sensor if ticket is added
-                    await self.hass.config_entries.async_reload(self._config_entry.entry_id)
 
                 return self.async_create_entry(title="", data={})
 
@@ -325,7 +256,6 @@ class SFExpressOptionsFlow(config_entries.OptionsFlow):
             "model": self._config_entry.data.get("model"),
             "deviceid": self._config_entry.data.get("deviceid"),
             "jsbundle": self._config_entry.data.get("jsbundle"),
-            CONF_SFBUY_TICKET: self._config_entry.data.get(CONF_SFBUY_TICKET),
         }
 
         return self.async_show_form(
@@ -341,39 +271,10 @@ class SFExpressOptionsFlow(config_entries.OptionsFlow):
                     vol.Required("model", default=defaults["model"]): str,
                     vol.Required("deviceid", default=defaults["deviceid"]): str,
                     vol.Required("jsbundle", default=defaults["jsbundle"]): str,
-                    vol.Optional(CONF_SFBUY_TICKET, default=defaults[CONF_SFBUY_TICKET]): str,
                 }
             ),
             errors=errors,
         )
-
-    async def _verify_sfbuy_ticket(self, ticket: str) -> None:
-        """Verify SFBuy ticket is valid."""
-        headers = SFBUY_HEADERS.copy()
-        headers["Cookie"] = f"token={ticket}"
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    f"{API_SFBUY_COUNT_ENDPOINT}?operator=",
-                    headers=headers,
-                ) as response:
-                    response_text = await response.text()
-                    _LOGGER.debug("SFBuy Response: %s", response_text)
-                    
-                    if response.status != 200:
-                        raise CannotConnect
-                    
-                    data = json.loads(response_text)
-                    if data.get("msg") != "成功":
-                        raise InvalidAuth(data.get("msg", "Unknown error"))
-
-        except aiohttp.ClientError as err:
-            _LOGGER.error("Error connecting to SFBuy: %s", err)
-            raise CannotConnect from err
-        except json.JSONDecodeError as err:
-            _LOGGER.error("Error decoding SFBuy response: %s", err)
-            raise CannotConnect from err
 
     async def _verify_sf_express(self, user_input: dict) -> None:
         """Verify SF Express credentials are valid."""
