@@ -21,3 +21,7 @@ API_QUERY_USER_ENDPOINT = "https://hmto.sf-express.com/cx-app-member/member/app/
 API_LIST_WAYBILL_ENDPOINT = "https://hmto.sf-express.com/proxy/query/queryBillRestService/listWayBill"
 API_QUERY_ROUTE_ENDPOINT = "https://hmto.sf-express.com/cx-app-query/query/app/waybillNo/queryWaybillByBNo"
 API_PICKUP_CODE_ENDPOINT = "https://hmto.sf-express.com/cx-app-order/order/app/recCode/fcRecCode"
+
+# Status codes
+STATUS_DELIVERED = "4"
+STATUS_DIVERTED = "9"

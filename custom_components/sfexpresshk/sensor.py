@@ -27,6 +27,8 @@ from .const import (
     API_LIST_WAYBILL_ENDPOINT,
     API_QUERY_ROUTE_ENDPOINT,
     API_PICKUP_CODE_ENDPOINT,
+    STATUS_DELIVERED,
+    STATUS_DIVERTED,
 )
 from .utils import generate_syttoken
 
@@ -276,7 +278,8 @@ class SFExpressCoordinator(DataUpdateCoordinator):
             delivered_waybills = [
                 waybill["waybillno"]
                 for waybill in self.data.get("dataList", [])
-                if waybill.get("waybillStatus") == "4"
+                if waybill.get("waybillStatus") == STATUS_DELIVERED # delivered
+                    or waybill.get("waybillStatus") == STATUS_DIVERTED # diverted
             ]
             for waybill_no in delivered_waybills:
                 if waybill_no in self._pickup_code_cache:
@@ -366,7 +369,8 @@ class SFExpressCoordinator(DataUpdateCoordinator):
                     waybills_in_transit = [
                         waybill["waybillno"]
                         for waybill in data["obj"].get("dataList", [])
-                        if waybill.get("waybillStatus") != "4"
+                        if waybill.get("waybillStatus") != STATUS_DELIVERED # delivered
+                            and waybill.get("waybillStatus") != STATUS_DIVERTED # diverted
                     ]
 
                     # Fetch routes for waybills in transit
@@ -411,7 +415,8 @@ class SFExpressWaybillSensor(CoordinatorEntity, SensorEntity):
         if self.coordinator.data is None:
             return None
         return sum(1 for waybill in self.coordinator.data.get("dataList", [])
-                  if waybill.get("waybillStatus") != "4")
+                  if waybill.get("waybillStatus") != STATUS_DELIVERED  # delivered
+                    and waybill.get("waybillStatus") != STATUS_DIVERTED)  # diverted
 
     @property
     def extra_state_attributes(self):
@@ -421,8 +426,9 @@ class SFExpressWaybillSensor(CoordinatorEntity, SensorEntity):
 
         waybills = []
         for waybill in self.coordinator.data.get("dataList", []):
-            # Only include undelivered waybills (waybillStatus != "4")
-            if waybill.get("waybillStatus") == "4":
+            # Only include undelivered waybills
+            if (waybill.get("waybillStatus") == STATUS_DELIVERED  # delivered
+                or waybill.get("waybillStatus") == STATUS_DIVERTED):  # diverted
                 continue
 
             waybill_data = {
